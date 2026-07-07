@@ -1,0 +1,1163 @@
+﻿<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>二戰風雲歷史溫習小遊戲 - 最終完美版</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+        /* Canvas custom styling */
+        #gameCanvas {
+            image-rendering: pixelated;
+            box-shadow: 0 0 25px rgba(245, 158, 11, 0.2);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between overflow-x-hidden">
+
+    <!-- Firebase App & Firestore JS -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'wwii-history-snake-game';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : {
+                apiKey: "",
+                authDomain: "mock-firebase.firebaseapp.com",
+                projectId: "mock-firebase",
+                storageBucket: "mock-firebase.appspot.com",
+                messagingSenderId: "123456",
+                appId: "1:123456:web:123"
+            };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let user = null;
+        let leaderboardData = [];
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase Authentication Failed: ", error);
+            }
+        };
+        initAuth();
+
+        onAuthStateChanged(auth, (currentUser) => {
+            user = currentUser;
+            if (user) {
+                console.log("Authenticated as user:", user.uid);
+                setupLeaderboardListener();
+            }
+        });
+
+        const getPublicCollectionRef = () => {
+            return collection(db, 'artifacts', appId, 'public', 'data', 'student_records');
+        };
+
+        const setupLeaderboardListener = () => {
+            const recordsRef = getPublicCollectionRef();
+            onSnapshot(recordsRef, (snapshot) => {
+                const list = [];
+                snapshot.forEach((doc) => {
+                    list.push({ id: doc.id, ...doc.data() });
+                });
+                list.sort((a, b) => (b.score || 0) - (a.score || 0));
+                leaderboardData = list;
+                window.updateLeaderboardUI(list);
+            }, (error) => {
+                console.error("Error fetching database records: ", error);
+            });
+        };
+
+        window.saveGameRecord = async (record) => {
+            // 1. Send data to Google Apps Script
+            const googleScriptUrl = "https://script.google.com/macros/s/AKfycbwU1KhUUZNCnAAugo8gttsx_bmt0uyH8dcqJiN_1c0jw1SEnoJnaTHDraSeu2C3KqDP/exec";
+            let googleSheetSuccess = false;
+
+            try {
+                // 使用 URLSearchParams (表單格式) 確保 Apps Script 能讀取 e.parameter
+                const formData = new URLSearchParams();
+                formData.append('timestamp', new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }));
+                formData.append('studentClass', record.studentClass);
+                formData.append('studentNo', record.studentNo);
+                formData.append('studentName', record.studentName);
+                formData.append('score', record.score);
+                formData.append('correctCount', record.correctCount);
+                formData.append('totalQuestions', record.totalQuestions);
+                formData.append('accuracyPercent', record.accuracyPercent);
+
+                // no-cors 模式發送
+                await fetch(googleScriptUrl, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    body: formData
+                });
+                googleSheetSuccess = true;
+                console.log("Data successfully transmitted to Google Sheet Web App via FormData.");
+            } catch (err) {
+                console.error("Failed to sync to Google Sheets:", err);
+            }
+
+            // 更新 UI 上傳狀態
+            const statusEl = document.getElementById('uploadStatus');
+            if (statusEl) {
+                if (googleSheetSuccess) {
+                    statusEl.innerHTML = `<i class="fa-solid fa-cloud-arrow-up text-emerald-400 mr-1.5 animate-bounce"></i>數據已成功同步至老師的 Google 試算表！`;
+                    statusEl.className = "text-xs text-emerald-400 mt-3 font-semibold flex items-center justify-center bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20";
+                } else {
+                    statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1.5"></i>Google 試算表同步超時，但本機與雲端榜已儲存。`;
+                    statusEl.className = "text-xs text-rose-400 mt-3 font-semibold flex items-center justify-center bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20";
+                }
+            }
+
+            // 2. 備份到系統 Firestore
+            if (!user) return googleSheetSuccess;
+            try {
+                const recordsRef = getPublicCollectionRef();
+                await addDoc(recordsRef, {
+                    ...record,
+                    uid: user.uid,
+                    timestamp: serverTimestamp()
+                });
+                return true;
+            } catch (error) {
+                console.error("Failed to save Firestore record:", error);
+                return googleSheetSuccess;
+            }
+        };
+
+        window.getLeaderboardData = () => leaderboardData;
+    </script>
+
+    <!-- MAIN GAME SCRIPT & INTERFACE -->
+    <div id="appContainer" class="flex-grow flex flex-col items-center justify-center p-4">
+        
+        <!-- HEADER -->
+        <header class="w-full max-w-4xl text-center mb-6">
+            <h1 class="text-3xl md:text-4xl font-extrabold tracking-wider text-amber-500 drop-shadow-lg">
+                <i class="fa-solid fa-hourglass-half mr-2"></i>二戰風雲：歷史溫習挑戰
+            </h1>
+            <p class="text-xs md:text-sm text-slate-400 mt-2">控制貪食蛇吃下「知識水晶」，挑戰二戰歷史，衝擊歷史學者寶座！</p>
+        </header>
+
+        <!-- 1. LOGIN SCREEN -->
+        <div id="loginScreen" class="w-full max-w-md bg-slate-800/80 backdrop-blur border border-slate-700 rounded-2xl p-6 md:p-8 shadow-2xl">
+            <div class="text-center mb-6">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-amber-500/10 text-amber-500 mb-3">
+                    <i class="fa-solid fa-user-graduate text-3xl"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-slate-100">學生登入介面</h2>
+                <p class="text-sm text-slate-400 mt-1">請填寫個人資料以記錄你的溫習成績</p>
+            </div>
+
+            <form id="loginForm" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-300 mb-1">中文/英文姓名</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
+                            <i class="fa-solid fa-signature"></i>
+                        </span>
+                        <input type="text" id="studentName" required class="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" placeholder="例如：陳大文">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-1">班別</label>
+                        <select id="studentClass" required class="w-full px-3 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500">
+                            <option value="">選擇班別</option>
+                            <option value="F.3A">F.3A</option>
+                            <option value="F.3B">F.3B</option>
+                            <option value="F.3C">F.3C</option>
+                            <option value="F.3D">F.3D</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-1">學號 (2位數)</label>
+                        <input type="number" id="studentNo" min="1" max="45" required class="w-full px-3 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" placeholder="如：05">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-slate-300 mb-1">班級密碼</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
+                            <i class="fa-solid fa-key"></i>
+                        </span>
+                        <input type="password" id="classPassword" required class="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" placeholder="請輸入老師提供的密碼">
+                    </div>
+                </div>
+
+                <div id="loginError" class="hidden text-rose-500 text-sm flex items-center gap-1.5 bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20">
+                    <i class="fa-solid fa-circle-exclamation"></i>
+                    <span id="loginErrorText">密碼不正確，請聯絡歷史科老師。</span>
+                </div>
+
+                <button type="submit" class="w-full py-3 bg-amber-500 hover:bg-amber-600 active:translate-y-[1px] text-slate-950 font-bold rounded-lg transition-colors shadow-lg shadow-amber-500/20 mt-2">
+                    開始溫習挑戰 <i class="fa-solid fa-arrow-right ml-1"></i>
+                </button>
+            </form>
+        </div>
+
+        <!-- 2. GAME WORKSPACE -->
+        <div id="gameWorkspace" class="hidden w-full max-w-4xl flex flex-col lg:flex-row gap-6 items-stretch justify-center">
+            
+            <!-- Left Panel: Snake Arena -->
+            <div class="flex-grow flex flex-col items-center justify-center bg-slate-800/50 backdrop-blur border border-slate-700/60 p-4 md:p-6 rounded-2xl relative">
+                <!-- User Profile Bar -->
+                <div class="w-full flex justify-between items-center bg-slate-900/80 px-4 py-2.5 rounded-xl border border-slate-700/40 mb-4 text-xs md:text-sm">
+                    <div class="flex items-center gap-2">
+                        <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span id="displayUserInfo" class="font-medium text-slate-200"></span>
+                    </div>
+                    <div class="flex items-center gap-4 font-bold text-amber-500">
+                        <span>進度: <span id="displayProgress" class="text-slate-100">0/20</span></span>
+                        <span>得分: <span id="displayScore" class="text-slate-100">0</span></span>
+                    </div>
+                </div>
+
+                <!-- Snake Board Container (with TabIndex for Focus) -->
+                <div class="relative bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700 max-w-full focus:outline-none" tabindex="0" id="snakeBoardArea">
+                    <canvas id="gameCanvas" width="400" height="400" class="block bg-slate-950 max-w-full h-auto"></canvas>
+                    
+                    <!-- Game Start Overlay -->
+                    <div id="gameOverlay" class="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center text-center p-6 transition-all duration-300 z-10">
+                        <div class="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500 mb-4 animate-bounce">
+                            <i class="fa-solid fa-play text-2xl pl-1"></i>
+                        </div>
+                        <h3 class="text-xl font-bold text-slate-100 mb-2">準備開始貪食蛇溫習</h3>
+                        <p class="text-xs text-slate-400 max-w-xs mb-6">
+                            控制鍵盤 <b>上下左右 / WASD</b> 鍵（手機可用下方虛擬搖桿），每吃下一個黃色水晶，即觸發一道歷史考題。
+                        </p>
+                        <button id="startGameBtn" class="px-6 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg transition-colors shadow-md">
+                            發動小蛇！
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Question overlay (已移出遊戲框，改為全螢幕覆蓋並加闊，解決版面太細問題) -->
+                <div id="questionModal" class="hidden fixed inset-0 bg-slate-950/95 flex items-center justify-center p-4 overflow-y-auto z-[60]">
+                    <div class="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl p-6 shadow-2xl relative max-h-[95vh] overflow-y-auto">
+                        
+                        <!-- Timer & Progress Header -->
+                        <div class="flex justify-between items-center mb-3 text-xs md:text-sm">
+                            <span class="bg-amber-500/10 text-amber-500 px-3 py-1.5 rounded-md font-semibold text-sm" id="questionTypeBadge">選擇題 (MC)</span>
+                            <div class="flex items-center gap-2">
+                                <span class="text-slate-400 font-medium">限時：</span>
+                                <span id="countdownText" class="font-bold text-rose-500 text-base">30s</span>
+                            </div>
+                        </div>
+
+                        <!-- Countdown Bar -->
+                        <div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden mb-5">
+                            <div id="countdownBar" class="bg-gradient-to-r from-amber-500 to-rose-500 h-full w-full transition-all duration-100"></div>
+                        </div>
+
+                        <!-- Question Text -->
+                        <div class="mb-5">
+                            <span class="text-sm text-slate-400 block mb-2 font-medium">第 <span id="currentQuestionNum">1</span> 題:</span>
+                            <!-- 加入 whitespace-pre-wrap 讓複式選擇題的 I. II. III. 可以正確分行 -->
+                            <h4 id="questionText" class="text-base md:text-lg font-bold text-slate-100 leading-relaxed whitespace-pre-wrap"></h4>
+                        </div>
+
+                        <!-- Answers Options Container -->
+                        <div id="mcOptions" class="space-y-3 hidden">
+                            <!-- Generated Dynamically -->
+                        </div>
+
+                        <!-- Cloze Input Container -->
+                        <div id="clozeInputContainer" class="space-y-3 hidden">
+                            <input type="text" id="clozeAnswer" class="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/50 text-base" placeholder="請輸入正確答案" autocomplete="off">
+                            <button id="submitClozeBtn" class="w-full py-3 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg transition-colors text-base shadow-lg shadow-amber-500/20">提交答案</button>
+                        </div>
+
+                        <!-- Feedback & Explanation (Initially Hidden) -->
+                        <div id="feedbackContainer" class="hidden mt-6 pt-5 border-t border-slate-700 space-y-4">
+                            <div id="feedbackHeader" class="flex items-center gap-2 text-lg font-black">
+                                <!-- Icons and correct state -->
+                            </div>
+                            <div class="text-sm text-slate-300 bg-slate-950/80 p-4 rounded-lg border border-slate-800/80">
+                                <strong class="text-amber-500 block mb-2">歷史知識補給：</strong>
+                                <p id="explanationText" class="leading-relaxed whitespace-pre-wrap"></p>
+                            </div>
+                            <button id="continueGameBtn" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-slate-100 font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 text-base mt-2 shadow-lg shadow-emerald-600/20">
+                                繼續遊戲 <i class="fa-solid fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Onscreen Mobile Controller -->
+                <div class="mt-4 grid grid-cols-3 gap-2 w-44 max-w-full">
+                    <div></div>
+                    <button id="ctrlUp" class="w-12 h-12 bg-slate-700 hover:bg-slate-600 active:bg-amber-500 active:text-slate-950 rounded-xl flex items-center justify-center text-slate-200 transition-colors shadow">
+                        <i class="fa-solid fa-chevron-up text-lg"></i>
+                    </button>
+                    <div></div>
+                    <button id="ctrlLeft" class="w-12 h-12 bg-slate-700 hover:bg-slate-600 active:bg-amber-500 active:text-slate-950 rounded-xl flex items-center justify-center text-slate-200 transition-colors shadow">
+                        <i class="fa-solid fa-chevron-left text-lg"></i>
+                    </button>
+                    <div class="w-12 h-12 bg-slate-800/40 rounded-xl flex items-center justify-center text-xs text-slate-500 font-bold">蛇</div>
+                    <button id="ctrlRight" class="w-12 h-12 bg-slate-700 hover:bg-slate-600 active:bg-amber-500 active:text-slate-950 rounded-xl flex items-center justify-center text-slate-200 transition-colors shadow">
+                        <i class="fa-solid fa-chevron-right text-lg"></i>
+                    </button>
+                    <div></div>
+                    <button id="ctrlDown" class="w-12 h-12 bg-slate-700 hover:bg-slate-600 active:bg-amber-500 active:text-slate-950 rounded-xl flex items-center justify-center text-slate-200 transition-colors shadow">
+                        <i class="fa-solid fa-chevron-down text-lg"></i>
+                    </button>
+                    <div></div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Side Stats & Leaderboard -->
+            <div class="w-full lg:w-80 flex flex-col gap-6">
+                <!-- Mini Score Panel -->
+                <div class="bg-slate-800/50 border border-slate-700/60 p-4 rounded-2xl flex flex-col justify-between">
+                    <h3 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider"><i class="fa-solid fa-trophy mr-1.5 text-amber-500"></i>實時雲端排行榜</h3>
+                    <div class="overflow-y-auto max-h-[220px] space-y-2 pr-1 text-xs" id="leaderboardList">
+                        <p class="text-slate-500 text-center py-4">正在載入排行榜資料...</p>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800/50 border border-slate-700/60 p-4 rounded-2xl">
+                    <h3 class="text-sm font-semibold text-slate-300 mb-2 uppercase tracking-wider"><i class="fa-solid fa-bullhorn mr-1.5 text-amber-500"></i>老師備忘</h3>
+                    <p class="text-xs text-slate-400 leading-relaxed mb-2">
+                        本遊戲每次隨機抽取 <b>15題選擇題</b> ＋ <b>5題填充題</b>，共 20 題。
+                    </p>
+                    <p class="text-xs text-slate-400 leading-relaxed">
+                        學生在貪食蛇模式中每吃一顆水晶，便會彈出對應題目。當答完全部 20 題，系統會自動上傳所有作答記錄至後台。
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. REPORT & END SCREEN -->
+        <div id="endScreen" class="hidden w-full max-w-4xl space-y-6">
+            <!-- Summary Banner -->
+            <div class="bg-gradient-to-r from-slate-800 to-slate-900 border border-slate-700/80 rounded-2xl p-6 md:p-8 text-center shadow-2xl relative overflow-hidden">
+                <div class="absolute -top-10 -left-10 w-40 h-40 bg-amber-500/5 rounded-full blur-3xl"></div>
+                <div class="absolute -bottom-10 -right-10 w-40 h-40 bg-emerald-500/5 rounded-full blur-3xl"></div>
+                
+                <span class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-amber-500/10 text-amber-500 mb-4">
+                    <i class="fa-solid fa-award text-4xl"></i>
+                </span>
+                <h2 class="text-2xl md:text-3xl font-extrabold text-slate-100">溫習挑戰圓滿結束！</h2>
+                
+                <div class="mt-4 flex flex-col md:flex-row justify-center items-center gap-6 py-4 px-6 bg-slate-950/50 rounded-xl border border-slate-800 max-w-md mx-auto">
+                    <div class="text-center">
+                        <span class="text-xs text-slate-400 uppercase tracking-widest block">總得分</span>
+                        <span class="text-4xl font-black text-amber-500" id="endScore">0</span>
+                    </div>
+                    <div class="w-px h-10 bg-slate-800 hidden md:block"></div>
+                    <div class="text-center">
+                        <span class="text-xs text-slate-400 uppercase tracking-widest block">答對題數</span>
+                        <span class="text-3xl font-bold text-slate-100" id="endAccuracy">0 / 0</span>
+                    </div>
+                </div>
+
+                <!-- Google Sheet Uploading Status Indicator -->
+                <div id="uploadStatus" class="text-xs text-amber-500 mt-3 font-semibold flex items-center justify-center">
+                    <i class="fa-solid fa-spinner animate-spin mr-1.5"></i> 正在自動上傳作答數據至 Google 試算表...
+                </div>
+
+                <div class="mt-6 max-w-lg mx-auto">
+                    <div class="text-sm font-semibold text-amber-500 uppercase tracking-widest mb-1">歷史老師評語</div>
+                    <p id="teacherFeedback" class="text-slate-300 italic text-sm md:text-base leading-relaxed"></p>
+                </div>
+
+                <div class="mt-6 flex flex-wrap justify-center gap-3">
+                    <button onclick="window.location.reload();" class="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg transition-colors flex items-center gap-1.5">
+                        <i class="fa-solid fa-rotate-left"></i> 再應戰一次
+                    </button>
+                    <button id="teacherExportBtn" class="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold rounded-lg transition-colors flex items-center gap-1.5">
+                        <i class="fa-solid fa-download text-amber-500"></i> 下載教師數據 CSV
+                    </button>
+                </div>
+            </div>
+
+            <!-- Review Section -->
+            <div class="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-4 md:p-6">
+                <h3 class="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-list-check text-amber-500"></i> 詳細答題回顧 (Review)
+                </h3>
+                <div id="reviewList" class="space-y-4">
+                    <!-- Dynamic review entries -->
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- FOOTER -->
+    <footer class="w-full text-center py-4 text-xs text-slate-500 border-t border-slate-900 mt-6">
+        &copy; 2026 歷史科溫習平台 - 二戰歷史科單元溫習遊戲. 適用於中三級世界歷史科。
+    </footer>
+
+    <!-- MAIN JAVASCRIPT LOGIC (SNAKE ENGINE, QUESTIONS & FLOW) -->
+    <script>
+        // 包含從你上載文件中擷取的最新問題
+        const QUESTION_BANK = {
+            mc: [
+                {
+                    q: "第一次世界大戰結果導致了四大帝國的瓦解，包括德意志、奧匈、俄羅斯及：",
+                    options: ["大英帝國", "鄂圖曼帝國", "法蘭西帝國", "日本帝國"],
+                    answer: "鄂圖曼帝國",
+                    explanation: "一戰結果導致四大帝國（德意志、奧匈、俄羅斯、鄂圖曼）瓦解，中東和東歐局勢重新洗牌。"
+                },
+                {
+                    q: "1919年巴黎和會的三巨頭包括美國總統威爾遜、法國總理克里孟梭及英國首相：",
+                    options: ["邱吉爾", "勞萊．喬治", "張伯倫", "艾德禮"],
+                    answer: "勞萊．喬治",
+                    explanation: "1919年巴黎和會由美（威爾遜）、法（克里孟梭）、英（勞萊．喬治）三巨頭主導制定戰後新秩序。"
+                },
+                {
+                    q: "根據凡爾賽條約，德國必須歸還哪個地區給法國？",
+                    options: ["阿爾薩斯-洛林", "蘇台德區", "萊茵河區", "西里西亞"],
+                    answer: "阿爾薩斯-洛林",
+                    explanation: "普法戰爭時法國割讓給德國的「阿爾薩斯-洛林」兩省，在一戰德國戰敗後，依凡爾賽條約歸還法國。"
+                },
+                {
+                    q: "經濟大衰退如何助長了納粹黨在德國的興起？",
+                    options: ["人民生活富足，支持政府", "失業與貧困使人民渴望強人政治", "美國提供了大量援助", "德國經濟未受影響"],
+                    answer: "失業與貧困使人民渴望強人政治",
+                    explanation: "大蕭條造成德國數百萬人失業，極度的經濟混亂與絕望情緒，使宣揚民族復興與反叛凡爾賽條約的納粹黨獲得廣大支持。"
+                },
+                {
+                    q: "受經濟大衰退影響，日本採取了什麼行動來獲取資源？",
+                    options: ["加強國際貿易", "入侵中國東北 (滿洲)", "裁減軍備", "加入國聯"],
+                    answer: "入侵中國東北 (滿洲)",
+                    explanation: "日本資源匱乏、遭受大蕭條打擊極重，軍部乘勢抬頭，主張以對外擴張奪取原材料，於1931年發動九一八事變佔領中國東北。"
+                },
+                {
+                    q: "希特拉在哪一年正式成為德國總理，標誌著威瑪共和的結束？",
+                    options: ["1923", "1929", "1933", "1939"],
+                    answer: "1933",
+                    explanation: "1933年1月，希特拉被任命為德國總理，隨即建立了法西斯一黨專政體制，威瑪共和國正式瓦解。"
+                },
+                {
+                    q: "凡爾賽條約的怨恨加上經濟大衰退的打擊，最終導致了哪種政治思潮在德義日氾濫？",
+                    options: ["自由民主主義", "法西斯/軍國主義", "無政府主義", "和平主義"],
+                    answer: "法西斯/軍國主義",
+                    explanation: "經濟危機和一戰遺留的國際屈辱，催生了極端民族主義與擴張導向的法西斯（德、意）及軍國主義（日本）政權。"
+                },
+                {
+                    q: "1919年成立的德國「威瑪共和國」之所以大失民心，其中一個主因是因為它接納了哪一條極苛刻的條約？",
+                    options: ["《慕尼黑協定》", "《德蘇互不侵犯條約》", "《凡爾賽條約》", "《波茨坦公告》"],
+                    answer: "《凡爾賽條約》",
+                    explanation: "威瑪共和國被迫簽署被德國人視為「恥辱」的凡爾賽條約，並承擔巨額戰爭賠償，使其從一開始便缺乏民眾認同。"
+                },
+                {
+                    q: "關於第二次世界大戰結束的時序，哪一個軸心國成員最先宣佈投降？",
+                    options: ["日本", "德國", "意大利", "蘇聯"],
+                    answer: "意大利",
+                    explanation: "軸心國崩潰的順序為：意大利最先於1943年投降並倒戈，德國於1945年5月投降，日本在遭受原子彈打擊後於1945年8月無條件投降。"
+                },
+                {
+                    q: "第二次世界大戰在歐洲爆發的導火線，是1939年9月德國採用「閃擊戰」入侵哪一個國家？",
+                    options: ["蘇聯", "法國", "波蘭", "英國"],
+                    answer: "波蘭",
+                    explanation: "1939年9月1日德軍進攻波蘭。英法在9月3日正式對德宣戰，標誌著第二次世界大戰的爆發。"
+                },
+                {
+                    q: "哪一個國家與德國組成「軸心國」陣營，並在亞洲及太平洋地區發動廣泛侵略？",
+                    options: ["意大利", "蘇聯", "日本", "中國"],
+                    answer: "日本",
+                    explanation: "德、意、日三國結成軸心國同盟。其中日本在亞洲與太平洋一帶大舉擴張，引發大戰的亞洲戰線。"
+                },
+                {
+                    q: "1941年底，甚麼事件促使美國放棄孤立主義，正式對軸心國宣戰並加入二戰？",
+                    options: ["德國潛艇攻擊美軍", "日本偷襲珍珠港", "德國入侵蘇聯", "法國淪陷"],
+                    answer: "日本偷襲珍珠港",
+                    explanation: "1941年12月7日，日本毫無預警偷襲珍珠港，使美國朝野震怒，宣布對日宣戰，美國自此全面加入同盟國參戰。"
+                },
+                {
+                    q: "為了迫使日本盡快投降，美國在1945年8月對日本哪兩個城市投下了原子彈？",
+                    options: ["東京、大阪", "廣島、長崎", "京都、橫濱", "廣島、東京"],
+                    answer: "廣島、長崎",
+                    explanation: "美國分別在1945年8月6日與9日，在廣島和長崎投下原子彈，促成了日本無條件投降，終結二戰。"
+                },
+                {
+                    q: "二戰後為了維持國際和平與安全，成立了甚麼國際組織取代失效的國際聯盟？",
+                    options: ["北大西洋公約組織 (NATO)", "聯合國 (UN)", "歐洲聯盟 (EU)", "華沙公約組織"],
+                    answer: "聯合國 (UN)",
+                    explanation: "為了防止大規模戰亂再度爆發，同盟國於1945年10月24日正式創立「聯合國」(United Nations)。"
+                },
+                {
+                    q: "第一次世界大戰後，哪一個國家成為全球最大的債權國、生產國和入口國？",
+                    options: ["英國", "法國", "美國", "日本"],
+                    answer: "美國",
+                    explanation: "美國在一戰期間大發戰爭財，戰後一躍成為世界金融中心與最強大的經濟體。"
+                },
+                {
+                    q: "以下哪些是德國納粹主義的特色？\nI. 一黨專政與領袖崇拜\nII. 泛日耳曼主義與建立警察國家\nIII. 民族優越論及反猶太主義\nIV. 反對《凡爾賽條約》",
+                    options: ["只有 I、II", "只有 I、III、IV", "只有 II、III、IV", "I、II、III、IV"],
+                    answer: "I、II、III、IV",
+                    explanation: "納粹主義包含極權領袖崇拜、擴張日耳曼生存空間、種族清洗（反猶）及撕毀凡爾賽條約等四大核心特徵。"
+                },
+                {
+                    q: "日本軍國主義的特色包括以下哪些內容？\nI. 軍事獨裁與天皇崇拜\nII. 對外擴張\nIII. 全面控制國家資源\nIV. 支持共產主義發展",
+                    options: ["只有 I、II", "只有 III、IV", "只有 I、II、III", "I、II、III、IV"],
+                    answer: "只有 I、II、III",
+                    explanation: "日本軍國主義強烈「反共」，因此不可能支持共產主義發展。其餘一至三項皆正確。"
+                },
+                {
+                    q: "1930年代，英、法兩國奉行綏靖政策，其推行的原因包括哪些？\nI. 英國首相張伯倫同情德國，認為《凡爾賽條約》太苛刻\nII. 英、法飽受一戰及經濟大衰退打擊，無力制止侵略\nIII. 英、法希望利用德國牽制共產蘇聯",
+                    options: ["只有 I、II", "只有 II、III", "只有 I、III", "I、II、III"],
+                    answer: "I、II、III",
+                    explanation: "綏靖政策的成因複雜，包含同情德國處境、國內反戰厭戰情緒、經濟疲弱，以及想借德國之手抵擋蘇聯共產勢力西進。"
+                },
+                {
+                    q: "以下哪些史實反映了英、法綏靖政策的「實證」？\nI. 容許德國佔領萊茵河區\nII. 容許德奧合併\nIII. 簽訂慕尼黑協定",
+                    options: ["只有 I", "只有 II、III", "只有 I、III", "I、II、III"],
+                    answer: "I、II、III",
+                    explanation: "從1936年德軍進駐萊茵河區、1938年吞併奧地利，到出賣捷克的《慕尼黑協定》，都是英法步步退讓的實證。"
+                }
+            ],
+            cloze: [
+                {
+                    q: "1923年東京大地震及1927年金融危機嚴重打擊了日本經濟，令人民對民主政府失去信心，軍國主義者乘機興起，並在1932年成功取得政權，實行【_______】極權統治。",
+                    answer: "軍國主義",
+                    explanation: "日本在內憂外患打擊下，民選文官政府無力收拾經濟殘局，軍隊強人隨即建立「軍國主義」體制。"
+                },
+                {
+                    q: "1933年，日本宣佈退出【_______】，隨後全力向中國侵略，並於1937年7月發動七七盧溝橋事變。",
+                    answer: "國際聯盟",
+                    answerAlternative: ["國際聯盟", "國聯", "League of Nations"],
+                    explanation: "國聯譴責日本入侵中國東北（滿洲）後，日本憤而宣佈退出國際聯盟，自此國際協商約束力蕩然無存。"
+                },
+                {
+                    q: "1940年9月，德、意、日三國正式簽署《三邊協定》，結成軍事同盟，稱為「【_______】軸心同盟」。",
+                    answer: "柏林-羅馬-東京",
+                    answerAlternative: ["柏林—羅馬—東京", "柏林羅馬東京", "德意日"],
+                    explanation: "德、意、日三國簽署柏林《三國同盟條約》（三邊協定），組成了以三個首都為軸心的「柏林-羅馬-東京」同盟。"
+                },
+                {
+                    q: "1938年10月，英國首相張伯倫與希特拉簽訂了《【_______】》，同意把捷克的蘇台德區交予德國。",
+                    answer: "慕尼黑協定",
+                    answerAlternative: ["《慕尼黑協定》", "慕尼黑協定"],
+                    explanation: "英、法首腦為苟安和平，在慕尼黑對德國妥協退讓，出賣弱小盟友捷克利益，這史稱《慕尼黑協定》。"
+                },
+                {
+                    q: "1939年3月，希特拉違反承諾派兵吞併了整個【_______】，促使英、法決定放棄綏靖政策。",
+                    answer: "捷克",
+                    answerAlternative: ["捷克斯洛伐克"],
+                    explanation: "希特拉在取得蘇台德地區僅半年後，即出兵吞併整固「捷克」本土，英法這才看清希特拉擴張野心，宣告綏靖政策徹底破產。"
+                },
+                {
+                    q: "日本在1931年向中國發動了【_______】事變，隨後入侵中國東北並建立偽滿洲國。",
+                    answer: "九一八",
+                    answerAlternative: ["918", "九一八事變"],
+                    explanation: "日本關東軍自行炸毀南滿鐵路路軌，反誣中國軍隊所為，以此為藉口發動「九一八」事變侵佔東三省。"
+                },
+                {
+                    q: "1939年8月，德蘇外交代表簽署了《德蘇互不侵犯條約》，這項條約清除了德國進攻【_______】的障礙。",
+                    answer: "波蘭",
+                    explanation: "德蘇瓜分東歐並簽立互不侵犯條約，使希特拉免除了與蘇聯兩面夾擊之憂，可以毫無忌憚地入侵「波蘭」。"
+                },
+                {
+                    q: "1923年，希特拉發動啤酒館政變失敗，在獄中寫成了【_______】闡述其極端政治思想。",
+                    answer: "《我的奮鬥》",
+                    answerAlternative: ["我的奮鬥", "Mein Kampf"],
+                    explanation: "希特拉在政變失敗服刑期間，口授寫成了著作《我的奮鬥》（Mein Kampf），宣揚日耳曼優越、反猶及擴張「生存空間」。"
+                }
+            ]
+        };
+
+        function shuffleArray(array) {
+            const arr = [...array];
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [arr[i], arr[j]] = [arr[j], arr[i]];
+            }
+            return arr;
+        }
+
+        // App state
+        let studentProfile = null;
+        let selectedQuestions = []; 
+        let currentQuestionIndex = 0;
+        let score = 0;
+        let timerInterval = null;
+        let timeLeft = 30;
+        let responses = []; 
+
+        // Snake Engine Variables
+        let canvas, ctx;
+        const grid = 20;
+        let snake = [];
+        let food = { x: 0, y: 0 };
+        let dx = grid;
+        let dy = 0;
+        let snakeSpeed = 160; 
+        let snakeTimer = null;
+        let snakeAlive = true;
+        let controlActive = true;
+        let changingDirection = false; 
+
+        // Login Handler
+        document.getElementById('loginForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            const name = document.getElementById('studentName').value.trim();
+            const sClass = document.getElementById('studentClass').value;
+            const sNo = document.getElementById('studentNo').value.trim();
+            const pass = document.getElementById('classPassword').value.trim();
+            const errorDiv = document.getElementById('loginError');
+
+            if (pass !== 'schoolf32026') {
+                errorDiv.classList.remove('hidden');
+                document.getElementById('loginErrorText').innerText = '班級密碼不正確，請詢問歷史科老師。';
+                return;
+            }
+
+            errorDiv.classList.add('hidden');
+            studentProfile = { name, sClass, sNo };
+            generateAssessment();
+            document.getElementById('loginScreen').classList.add('hidden');
+            document.getElementById('gameWorkspace').classList.remove('hidden');
+            document.getElementById('displayUserInfo').innerText = `🙋 ${sClass} (學號: ${sNo}) ${name}`;
+            document.getElementById('displayProgress').innerText = `0 / ${selectedQuestions.length}`;
+            
+            initSnakeGame();
+            document.getElementById('snakeBoardArea').focus();
+        });
+
+        function generateAssessment() {
+            const shuffledMCs = shuffleArray(QUESTION_BANK.mc);
+            const shuffledClozes = shuffleArray(QUESTION_BANK.cloze);
+            const selectedMCs = shuffledMCs.slice(0, 15);
+            const selectedClozes = shuffledClozes.slice(0, 5);
+            selectedQuestions = [];
+            let mcIdx = 0, clozeIdx = 0;
+            for (let i = 0; i < 5; i++) {
+                if(selectedMCs[mcIdx]) selectedQuestions.push({ ...selectedMCs[mcIdx++], type: 'mc' });
+                if(selectedMCs[mcIdx]) selectedQuestions.push({ ...selectedMCs[mcIdx++], type: 'mc' });
+                if(selectedMCs[mcIdx]) selectedQuestions.push({ ...selectedMCs[mcIdx++], type: 'mc' });
+                if(selectedClozes[clozeIdx]) selectedQuestions.push({ ...selectedClozes[clozeIdx++], type: 'cloze' });
+            }
+        }
+
+        function initSnakeGame() {
+            canvas = document.getElementById('gameCanvas');
+            ctx = canvas.getContext('2d');
+            resetSnake();
+            drawCanvasBoard();
+            
+            document.getElementById('startGameBtn').onclick = () => {
+                document.getElementById('gameOverlay').classList.add('hidden');
+                dx = grid;
+                dy = 0;
+                snakeAlive = true;
+                controlActive = true;
+                document.getElementById('snakeBoardArea').focus();
+                runSnakeLoop();
+            };
+        }
+
+        function resetSnake() {
+            snake = [
+                { x: 160, y: 200 },
+                { x: 140, y: 200 },
+                { x: 120, y: 200 }
+            ];
+            dx = grid;
+            dy = 0;
+            changingDirection = false;
+            placeFood();
+        }
+
+        function placeFood() {
+            let valid = false;
+            while(!valid) {
+                food.x = Math.floor(Math.random() * (canvas.width / grid)) * grid;
+                food.y = Math.floor(Math.random() * (canvas.height / grid)) * grid;
+                valid = true;
+                for(let cell of snake) {
+                    if (cell.x === food.x && cell.y === food.y) {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        function runSnakeLoop() {
+            if (snakeTimer) clearInterval(snakeTimer);
+            snakeTimer = setInterval(() => {
+                if (!snakeAlive) return;
+                moveSnake();
+                drawCanvasBoard();
+            }, snakeSpeed);
+        }
+
+        function moveSnake() {
+            changingDirection = false;
+            const head = { x: snake[0].x + dx, y: snake[0].y + dy };
+
+            if (head.x < 0) head.x = canvas.width - grid;
+            if (head.x >= canvas.width) head.x = 0;
+            if (head.y < 0) head.y = canvas.height - grid;
+            if (head.y >= canvas.height) head.y = 0;
+
+            for (let i = 0; i < snake.length; i++) {
+                if (head.x === snake[i].x && head.y === snake[i].y) {
+                    score = Math.max(0, score - 5);
+                    document.getElementById('displayScore').innerText = score;
+                    resetSnake();
+                    return;
+                }
+            }
+
+            snake.unshift(head);
+
+            if (head.x === food.x && head.y === food.y) {
+                clearInterval(snakeTimer);
+                triggerQuestionFlow();
+            } else {
+                snake.pop();
+            }
+        }
+
+        function drawCanvasBoard() {
+            ctx.fillStyle = '#020617';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 1;
+            for(let x=0; x < canvas.width; x += grid) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+            for(let y=0; y < canvas.height; y += grid) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#f59e0b';
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(food.x + grid/2, food.y);
+            ctx.lineTo(food.x + grid, food.y + grid/2);
+            ctx.lineTo(food.x + grid/2, food.y + grid);
+            ctx.lineTo(food.x, food.y + grid/2);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            snake.forEach((part, index) => {
+                const isHead = index === 0;
+                ctx.fillStyle = isHead ? '#10b981' : '#34d399';
+                ctx.fillRect(part.x + 1, part.y + 1, grid - 2, grid - 2);
+                if (isHead) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(part.x + 4, part.y + 4, 3, 3);
+                    ctx.fillRect(part.x + 12, part.y + 4, 3, 3);
+                }
+            });
+        }
+
+        // --- KEYBOARD EVENT (e.code FIX) ---
+        function changeDirection(newDx, newDy) {
+            if (!controlActive) return;
+            if (changingDirection) return; 
+            if (dx !== 0 && newDx !== 0) return;
+            if (dy !== 0 && newDy !== 0) return;
+
+            changingDirection = true;
+            dx = newDx;
+            dy = newDy;
+        }
+
+        window.addEventListener('keydown', (e) => {
+            // 防干擾：打字時不觸發蛇的移動
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') {
+                return;
+            }
+
+            // e.code 能無視中文輸入法與大小寫，直接捕捉實體按鍵
+            switch(e.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    changeDirection(0, -grid);
+                    e.preventDefault();
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    changeDirection(0, grid);
+                    e.preventDefault();
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    changeDirection(-grid, 0);
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    changeDirection(grid, 0);
+                    e.preventDefault();
+                    break;
+            }
+        });
+
+        document.getElementById('ctrlUp').onclick = () => { changeDirection(0, -grid); document.getElementById('snakeBoardArea').focus(); };
+        document.getElementById('ctrlDown').onclick = () => { changeDirection(0, grid); document.getElementById('snakeBoardArea').focus(); };
+        document.getElementById('ctrlLeft').onclick = () => { changeDirection(-grid, 0); document.getElementById('snakeBoardArea').focus(); };
+        document.getElementById('ctrlRight').onclick = () => { changeDirection(grid, 0); document.getElementById('snakeBoardArea').focus(); };
+
+        // --- QUESTION HANDLING ---
+        function triggerQuestionFlow() {
+            controlActive = false; 
+            const currentQ = selectedQuestions[currentQuestionIndex];
+            
+            document.getElementById('currentQuestionNum').innerText = currentQuestionIndex + 1;
+            document.getElementById('questionText').innerHTML = currentQ.q;
+            document.getElementById('feedbackContainer').classList.add('hidden');
+            document.getElementById('mcOptions').classList.add('hidden');
+            document.getElementById('clozeInputContainer').classList.add('hidden');
+
+            if (currentQ.type === 'mc') {
+                document.getElementById('questionTypeBadge').innerText = "選擇題 (MC)";
+                document.getElementById('questionTypeBadge').className = "bg-amber-500/10 text-amber-500 px-2 py-1 rounded-md font-semibold";
+                const shuffledOpts = shuffleArray(currentQ.options);
+                const mcContainer = document.getElementById('mcOptions');
+                mcContainer.innerHTML = '';
+                
+                shuffledOpts.forEach(opt => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = "w-full text-left px-4 py-3 bg-slate-800 hover:bg-slate-700/80 border border-slate-700 rounded-lg text-slate-200 transition-colors text-sm font-medium flex justify-between items-center";
+                    btn.innerHTML = `<span>${opt}</span> <i class="fa-regular fa-circle text-slate-500"></i>`;
+                    btn.onclick = () => checkMCAnswer(btn, opt, currentQ);
+                    mcContainer.appendChild(btn);
+                });
+                mcContainer.classList.remove('hidden');
+            } else {
+                document.getElementById('questionTypeBadge').innerText = "填充題";
+                document.getElementById('questionTypeBadge').className = "bg-sky-500/10 text-sky-400 px-2 py-1 rounded-md font-semibold";
+                document.getElementById('clozeAnswer').value = '';
+                document.getElementById('clozeAnswer').disabled = false;
+                document.getElementById('submitClozeBtn').disabled = false;
+                document.getElementById('submitClozeBtn').classList.remove('opacity-50');
+                document.getElementById('clozeInputContainer').classList.remove('hidden');
+                
+                setTimeout(() => { document.getElementById('clozeAnswer').focus(); }, 100);
+                
+                document.getElementById('submitClozeBtn').onclick = () => {
+                    const userVal = document.getElementById('clozeAnswer').value.trim();
+                    if (!userVal) return;
+                    checkClozeAnswer(userVal, currentQ);
+                };
+            }
+
+            document.getElementById('questionModal').classList.remove('hidden');
+            timeLeft = 30;
+            updateCountdownUI();
+            
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                updateCountdownUI();
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    handleTimeOut(currentQ);
+                }
+            }, 1000);
+        }
+
+        function updateCountdownUI() {
+            document.getElementById('countdownText').innerText = `${timeLeft}s`;
+            const percentage = (timeLeft / 30) * 100;
+            document.getElementById('countdownBar').style.width = `${percentage}%`;
+            if (timeLeft <= 10) {
+                document.getElementById('countdownBar').className = "bg-rose-500 h-full w-full transition-all duration-100";
+            } else {
+                document.getElementById('countdownBar').className = "bg-gradient-to-r from-amber-500 to-rose-500 h-full w-full transition-all duration-100";
+            }
+        }
+
+        function disableAllInputs() {
+            const mcBtns = document.querySelectorAll('#mcOptions button');
+            mcBtns.forEach(btn => btn.disabled = true);
+            document.getElementById('clozeAnswer').disabled = true;
+            document.getElementById('submitClozeBtn').disabled = true;
+            document.getElementById('submitClozeBtn').classList.add('opacity-50');
+        }
+
+        function checkMCAnswer(selectedBtn, userAns, qObj) {
+            clearInterval(timerInterval);
+            disableAllInputs();
+            const isCorrect = userAns === qObj.answer;
+            let finalScoreAdded = 0;
+
+            const mcBtns = document.querySelectorAll('#mcOptions button');
+            mcBtns.forEach(btn => {
+                const text = btn.querySelector('span').innerText;
+                if (text === qObj.answer) {
+                    btn.className = "w-full text-left px-4 py-3 bg-emerald-950/80 border border-emerald-500 rounded-lg text-emerald-200 text-sm font-semibold flex justify-between items-center";
+                    btn.querySelector('i').className = "fa-solid fa-circle-check text-emerald-500";
+                } else if (text === userAns && !isCorrect) {
+                    btn.className = "w-full text-left px-4 py-3 bg-rose-950/80 border border-rose-500 rounded-lg text-rose-200 text-sm font-semibold flex justify-between items-center";
+                    btn.querySelector('i').className = "fa-solid fa-circle-xmark text-rose-500";
+                }
+            });
+
+            if (isCorrect) {
+                finalScoreAdded = 100 + (timeLeft * 5);
+                score += finalScoreAdded;
+                showFeedback(true, `答對了！+${finalScoreAdded}分`, qObj.explanation);
+            } else {
+                showFeedback(false, `答錯了。正確答案是：${qObj.answer}`, qObj.explanation);
+            }
+
+            responses.push({
+                questionNum: currentQuestionIndex + 1,
+                questionText: qObj.q,
+                type: 'mc',
+                userAnswer: userAns,
+                correctAnswer: qObj.answer,
+                isCorrect: isCorrect,
+                scoreEarned: finalScoreAdded,
+                timeLeft: timeLeft
+            });
+            document.getElementById('displayScore').innerText = score;
+        }
+
+        function checkClozeAnswer(userAns, qObj) {
+            clearInterval(timerInterval);
+            disableAllInputs();
+            const cleanUserAns = userAns.toLowerCase().replace(/\s+/g, '');
+            const cleanCorrectAns = qObj.answer.toLowerCase().replace(/\s+/g, '');
+            let isCorrect = cleanUserAns === cleanCorrectAns;
+            
+            if (qObj.answerAlternative) {
+                qObj.answerAlternative.forEach(alt => {
+                    if (cleanUserAns === alt.toLowerCase().replace(/\s+/g, '')) {
+                        isCorrect = true;
+                    }
+                });
+            }
+
+            let finalScoreAdded = 0;
+            if (isCorrect) {
+                finalScoreAdded = 120 + (timeLeft * 5);
+                score += finalScoreAdded;
+                showFeedback(true, `答對了！你太厲害了！+${finalScoreAdded}分`, qObj.explanation);
+            } else {
+                showFeedback(false, `答錯了。正確答案是：${qObj.answer}`, qObj.explanation);
+            }
+
+            responses.push({
+                questionNum: currentQuestionIndex + 1,
+                questionText: qObj.q,
+                type: 'cloze',
+                userAnswer: userAns,
+                correctAnswer: qObj.answer,
+                isCorrect: isCorrect,
+                scoreEarned: finalScoreAdded,
+                timeLeft: timeLeft
+            });
+            document.getElementById('displayScore').innerText = score;
+        }
+
+        function handleTimeOut(qObj) {
+            disableAllInputs();
+            showFeedback(false, `超時！這道題目限時已到。正確答案是：${qObj.answer}`, qObj.explanation);
+            responses.push({
+                questionNum: currentQuestionIndex + 1,
+                questionText: qObj.q,
+                type: qObj.type,
+                userAnswer: "[TIMEOUT] 未作答",
+                correctAnswer: qObj.answer,
+                isCorrect: false,
+                scoreEarned: 0,
+                timeLeft: 0
+            });
+        }
+
+        function showFeedback(isCorrect, heading, explanation) {
+            const feedContainer = document.getElementById('feedbackContainer');
+            const feedHeader = document.getElementById('feedbackHeader');
+            const explanationText = document.getElementById('explanationText');
+
+            if (isCorrect) {
+                feedHeader.className = "flex items-center gap-2 text-emerald-500 text-base font-bold";
+                feedHeader.innerHTML = `<i class="fa-solid fa-circle-check text-xl"></i> <span>${heading}</span>`;
+            } else {
+                feedHeader.className = "flex items-center gap-2 text-rose-500 text-base font-bold";
+                feedHeader.innerHTML = `<i class="fa-solid fa-circle-xmark text-xl"></i> <span>${heading}</span>`;
+            }
+
+            explanationText.innerText = explanation;
+            feedContainer.classList.remove('hidden');
+
+            document.getElementById('continueGameBtn').onclick = () => {
+                document.getElementById('questionModal').classList.add('hidden');
+                currentQuestionIndex++;
+                document.getElementById('displayProgress').innerText = `${currentQuestionIndex} / ${selectedQuestions.length}`;
+
+                if (currentQuestionIndex >= selectedQuestions.length) {
+                    triggerGameEnding();
+                } else {
+                    placeFood();
+                    snakeAlive = true;
+                    controlActive = true;
+                    document.getElementById('snakeBoardArea').focus();
+                    runSnakeLoop();
+                }
+            };
+        }
+
+        // --- END GAME, LEADERS, REPORTS ---
+        async function triggerGameEnding() {
+            clearInterval(snakeTimer);
+            document.getElementById('gameWorkspace').classList.add('hidden');
+            document.getElementById('endScreen').classList.remove('hidden');
+
+            document.getElementById('endScore').innerText = score;
+            const correctCount = responses.filter(r => r.isCorrect).length;
+            document.getElementById('endAccuracy').innerText = `${correctCount} / ${responses.length}`;
+
+            let evalText = "";
+            const percentage = (correctCount / responses.length) * 100;
+            if (percentage >= 90) {
+                evalText = "👑 <b>歷史學者（超凡大師）！</b>你對二戰歷史的掌握可謂爐火純青，理解能力極高！連極微細的歷史細節（如凡爾賽條約與巴黎和會角力）都瞭如指掌，堪稱我們學校的邱吉爾！";
+            } else if (percentage >= 70) {
+                evalText = "⚔️ <b>盟軍先鋒（表現優異）！</b>表現亮眼！你對二戰的起因、經過、極權主義興起和戰後格局等大主線掌握的相當清晰。只要多加注意一兩題填充細節，必定能穩奪高分！";
+            } else if (percentage >= 50) {
+                evalText = "🛡️ <b>凡爾賽守軍（合格水平）！</b>及格了！你的基本概念是具備的，但面對「綏靖政策的實證」或「經濟大衰退的連鎖效應」等題目依然有所混淆。建議在考前細讀本次答題回顧以彌補漏洞！";
+            } else {
+                evalText = "📖 <b>威瑪待考生（需加油）！</b>需要加把勁啊！這次溫習暴露出許多核心概念的缺失。不要灰心，多玩兩次本遊戲，並對照下方的「答題回顧」認真記憶歷史細節，一定能有飛躍性的進步！";
+            }
+            document.getElementById('teacherFeedback').innerHTML = evalText;
+
+            const reviewList = document.getElementById('reviewList');
+            reviewList.innerHTML = ''; 
+            responses.forEach(res => {
+                const card = document.createElement('div');
+                card.className = `p-4 rounded-xl border ${res.isCorrect ? 'bg-emerald-950/20 border-emerald-500/30' : 'bg-rose-950/20 border-rose-500/30'} space-y-2 text-sm`;
+                card.innerHTML = `
+                    <div class="flex justify-between items-start gap-2">
+                        <span class="font-bold text-slate-100 whitespace-pre-wrap">第 ${res.questionNum} 題: \n${res.questionText}</span>
+                        <span class="px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap ${res.isCorrect ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}">
+                            ${res.isCorrect ? `<i class="fa-solid fa-check mr-1"></i>答對 (+${res.scoreEarned})` : `<i class="fa-solid fa-xmark mr-1"></i>答錯`}
+                        </span>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs py-1.5 px-3 bg-slate-900/60 rounded border border-slate-800 mt-2">
+                        <div><span class="text-slate-400">你選擇/填寫的答案：</span> <b class="${res.isCorrect ? 'text-emerald-400' : 'text-rose-400'}">${res.userAnswer}</b></div>
+                        <div><span class="text-slate-400">系統標準正確答案：</span> <b class="text-emerald-400">${res.correctAnswer}</b></div>
+                    </div>
+                    <p class="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap mt-2"><strong class="text-amber-500">解析：</strong>${QUESTION_BANK.mc.concat(QUESTION_BANK.cloze).find(q => q.q === res.questionText)?.explanation || '無詳細解析'}</p>
+                `;
+                reviewList.appendChild(card);
+            });
+
+            const recordPayload = {
+                studentName: studentProfile.name,
+                studentClass: studentProfile.sClass,
+                studentNo: studentProfile.sNo,
+                score: score,
+                correctCount: correctCount,
+                totalQuestions: responses.length,
+                accuracyPercent: parseFloat(percentage.toFixed(1)),
+                detailedResponses: responses
+            };
+
+            if (window.saveGameRecord) {
+                await window.saveGameRecord(recordPayload);
+            }
+        }
+
+        window.updateLeaderboardUI = (list) => {
+            const listContainer = document.getElementById('leaderboardList');
+            if (!listContainer) return;
+            listContainer.innerHTML = '';
+            if (list.length === 0) {
+                listContainer.innerHTML = `<p class="text-slate-500 text-center py-4">暫時沒有挑戰記錄</p>`;
+                return;
+            }
+            const topList = list.slice(0, 15);
+            topList.forEach((rec, idx) => {
+                const isTopThree = idx < 3;
+                let trophyColor = '';
+                if (idx === 0) trophyColor = 'text-yellow-400';
+                else if (idx === 1) trophyColor = 'text-slate-300';
+                else if (idx === 2) trophyColor = 'text-amber-600';
+                const div = document.createElement('div');
+                div.className = "flex items-center justify-between px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg hover:border-slate-700 transition-colors";
+                div.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <span class="w-5 font-bold text-center text-slate-400 ${isTopThree ? 'text-amber-500 text-sm' : 'text-xs'}">
+                            ${isTopThree ? `<i class="fa-solid fa-trophy ${trophyColor}"></i>` : idx + 1}
+                        </span>
+                        <div class="flex flex-col">
+                            <span class="font-bold text-slate-200 text-xs">${rec.studentClass} (${rec.studentNo}) ${rec.studentName}</span>
+                            <span class="text-[10px] text-slate-500">答對: ${rec.correctCount}/${rec.totalQuestions} 題</span>
+                        </div>
+                    </div>
+                    <div class="font-black text-amber-500 text-xs">${rec.score} pts</div>
+                `;
+                listContainer.appendChild(div);
+            });
+        };
+
+        document.getElementById('teacherExportBtn').onclick = () => {
+            const pw = prompt("請輸入教師管理密碼以導出所有學生作答數據：");
+            if (pw !== "schoolf32026") {
+                alert("密碼不正確，拒絕訪問數據！");
+                return;
+            }
+            const allRecords = window.getLeaderboardData();
+            if (!allRecords || allRecords.length === 0) {
+                alert("目前尚無學生提交紀錄，無法導出！");
+                return;
+            }
+            let csvContent = "\uFEFF"; 
+            csvContent += "排名,班別,學號,姓名,得分,答對題數,總題數,正確率(%),提交時間\n";
+            allRecords.forEach((rec, idx) => {
+                let dateStr = "";
+                if (rec.timestamp) {
+                    try {
+                        const date = rec.timestamp.toDate ? rec.timestamp.toDate() : new Date(rec.timestamp);
+                        dateStr = date.toLocaleString();
+                    } catch(e) {
+                        dateStr = "未知";
+                    }
+                }
+                csvContent += `${idx + 1},${rec.studentClass},${rec.studentNo},${rec.studentName},${rec.score},${rec.correctCount},${rec.totalQuestions},${rec.accuracyPercent}%,${dateStr}\n`;
+            });
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.setAttribute("href", url);
+            link.setAttribute("download", `歷史溫習小遊戲_二戰數據報表_${new Date().toLocaleDateString()}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        };
+    </script>
+</body>
+</html>
