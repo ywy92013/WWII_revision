@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
@@ -96,37 +96,65 @@
             let googleSheetSuccess = false;
 
             try {
-                // 使用 URLSearchParams (表單格式) 確保 Apps Script 能讀取 e.parameter
-                const formData = new URLSearchParams();
-                formData.append('timestamp', new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }));
-                formData.append('studentClass', record.studentClass);
-                formData.append('studentNo', record.studentNo);
-                formData.append('studentName', record.studentName);
-                formData.append('score', record.score);
-                formData.append('correctCount', record.correctCount);
-                formData.append('totalQuestions', record.totalQuestions);
-                formData.append('accuracyPercent', record.accuracyPercent);
+                // 【終極解決方案】：使用隱藏表單 (Hidden Form) 與 iframe 提交，100% 避開瀏覽器跨域 (CORS) 阻擋！
+                const iframeName = 'hidden_iframe_' + Date.now();
+                const iframe = document.createElement('iframe');
+                iframe.name = iframeName;
+                iframe.style.display = 'none';
+                document.body.appendChild(iframe);
 
-                // no-cors 模式發送
-                await fetch(googleScriptUrl, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    body: formData
-                });
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = googleScriptUrl;
+                form.target = iframeName;
+
+                // 準備要送出的資料
+                const payload = {
+                    timestamp: new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
+                    studentClass: record.studentClass,
+                    studentNo: record.studentNo,
+                    studentName: record.studentName,
+                    score: record.score,
+                    correctCount: record.correctCount,
+                    totalQuestions: record.totalQuestions,
+                    accuracyPercent: record.accuracyPercent,
+                    detailedResponses: JSON.stringify(record.detailedResponses)
+                };
+
+                // 將資料轉換為表單輸入框
+                for (const key in payload) {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = key;
+                    input.value = payload[key];
+                    form.appendChild(input);
+                }
+
+                // 執行背景提交
+                document.body.appendChild(form);
+                form.submit();
+                
                 googleSheetSuccess = true;
-                console.log("Data successfully transmitted to Google Sheet Web App via FormData.");
+                console.log("Data successfully transmitted to Google Sheet Web App via Hidden Form.");
+
+                // 提交完成後幾秒鐘自動清理隱藏元素
+                setTimeout(() => {
+                    document.body.removeChild(form);
+                    document.body.removeChild(iframe);
+                }, 5000);
+
             } catch (err) {
-                console.error("Failed to sync to Google Sheets:", err);
+                console.error("Failed to sync to Google Sheets via Hidden Form:", err);
             }
 
             // 更新 UI 上傳狀態
             const statusEl = document.getElementById('uploadStatus');
             if (statusEl) {
                 if (googleSheetSuccess) {
-                    statusEl.innerHTML = `<i class="fa-solid fa-cloud-arrow-up text-emerald-400 mr-1.5 animate-bounce"></i>數據已成功同步至老師的 Google 試算表！`;
+                    statusEl.innerHTML = `<i class="fa-solid fa-cloud-arrow-up text-emerald-400 mr-1.5 animate-bounce"></i>數據已成功發送至老師的 Google 試算表！`;
                     statusEl.className = "text-xs text-emerald-400 mt-3 font-semibold flex items-center justify-center bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20";
                 } else {
-                    statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1.5"></i>Google 試算表同步超時，但本機與雲端榜已儲存。`;
+                    statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1.5"></i>Google 試算表發送失敗，但本機與雲端榜已儲存。`;
                     statusEl.className = "text-xs text-rose-400 mt-3 font-semibold flex items-center justify-center bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20";
                 }
             }
@@ -841,7 +869,7 @@
 
             if (currentQ.type === 'mc') {
                 document.getElementById('questionTypeBadge').innerText = "選擇題 (MC)";
-                document.getElementById('questionTypeBadge').className = "bg-amber-500/10 text-amber-500 px-2 py-1 rounded-md font-semibold";
+                document.getElementById('questionTypeBadge').className = "bg-amber-500/10 text-amber-500 px-3 py-1.5 rounded-md font-semibold text-sm";
                 const shuffledOpts = shuffleArray(currentQ.options);
                 const mcContainer = document.getElementById('mcOptions');
                 mcContainer.innerHTML = '';
@@ -857,7 +885,7 @@
                 mcContainer.classList.remove('hidden');
             } else {
                 document.getElementById('questionTypeBadge').innerText = "填充題";
-                document.getElementById('questionTypeBadge').className = "bg-sky-500/10 text-sky-400 px-2 py-1 rounded-md font-semibold";
+                document.getElementById('questionTypeBadge').className = "bg-sky-500/10 text-sky-400 px-3 py-1.5 rounded-md font-semibold text-sm";
                 document.getElementById('clozeAnswer').value = '';
                 document.getElementById('clozeAnswer').disabled = false;
                 document.getElementById('submitClozeBtn').disabled = false;
