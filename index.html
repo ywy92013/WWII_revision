@@ -25,7 +25,7 @@
 </head>
 <body class="min-h-screen flex flex-col justify-between overflow-x-hidden">
 
-    <!-- Firebase App & Firestore JS -->
+    <!-- Firebase App & Firestore JS (負責雲端排行榜，若在 file:/// 開啟會自動靜默跳過) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -66,7 +66,6 @@
         onAuthStateChanged(auth, (currentUser) => {
             user = currentUser;
             if (user) {
-                console.log("Authenticated as user:", user.uid);
                 setupLeaderboardListener();
             }
         });
@@ -84,83 +83,21 @@
                 });
                 list.sort((a, b) => (b.score || 0) - (a.score || 0));
                 leaderboardData = list;
-                window.updateLeaderboardUI(list);
+                
+                // 【修復關鍵】：安全地呼叫 UI 更新函數。若此時底部 JavaScript 尚未加載完畢，先將數據存入 pending 隊列。
+                if (typeof window.updateLeaderboardUI === 'function') {
+                    window.updateLeaderboardUI(list);
+                } else {
+                    window.pendingLeaderboardList = list;
+                }
             }, (error) => {
                 console.error("Error fetching database records: ", error);
             });
         };
 
+        // Firebase 內部備份
         window.saveGameRecord = async (record) => {
-            // 1. Send data to Google Apps Script
-            const googleScriptUrl = "https://script.google.com/macros/s/AKfycbwU1KhUUZNCnAAugo8gttsx_bmt0uyH8dcqJiN_1c0jw1SEnoJnaTHDraSeu2C3KqDP/exec";
-            let googleSheetSuccess = false;
-
-            try {
-                // 【終極解決方案】：使用隱藏表單 (Hidden Form) 與 iframe 提交，100% 避開瀏覽器跨域 (CORS) 阻擋！
-                const iframeName = 'hidden_iframe_' + Date.now();
-                const iframe = document.createElement('iframe');
-                iframe.name = iframeName;
-                iframe.style.display = 'none';
-                document.body.appendChild(iframe);
-
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = googleScriptUrl;
-                form.target = iframeName;
-
-                // 準備要送出的資料
-                const payload = {
-                    timestamp: new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }),
-                    studentClass: record.studentClass,
-                    studentNo: record.studentNo,
-                    studentName: record.studentName,
-                    score: record.score,
-                    correctCount: record.correctCount,
-                    totalQuestions: record.totalQuestions,
-                    accuracyPercent: record.accuracyPercent,
-                    detailedResponses: JSON.stringify(record.detailedResponses)
-                };
-
-                // 將資料轉換為表單輸入框
-                for (const key in payload) {
-                    const input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = key;
-                    input.value = payload[key];
-                    form.appendChild(input);
-                }
-
-                // 執行背景提交
-                document.body.appendChild(form);
-                form.submit();
-                
-                googleSheetSuccess = true;
-                console.log("Data successfully transmitted to Google Sheet Web App via Hidden Form.");
-
-                // 提交完成後幾秒鐘自動清理隱藏元素
-                setTimeout(() => {
-                    document.body.removeChild(form);
-                    document.body.removeChild(iframe);
-                }, 5000);
-
-            } catch (err) {
-                console.error("Failed to sync to Google Sheets via Hidden Form:", err);
-            }
-
-            // 更新 UI 上傳狀態
-            const statusEl = document.getElementById('uploadStatus');
-            if (statusEl) {
-                if (googleSheetSuccess) {
-                    statusEl.innerHTML = `<i class="fa-solid fa-cloud-arrow-up text-emerald-400 mr-1.5 animate-bounce"></i>數據已成功發送至老師的 Google 試算表！`;
-                    statusEl.className = "text-xs text-emerald-400 mt-3 font-semibold flex items-center justify-center bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20";
-                } else {
-                    statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1.5"></i>Google 試算表發送失敗，但本機與雲端榜已儲存。`;
-                    statusEl.className = "text-xs text-rose-400 mt-3 font-semibold flex items-center justify-center bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20";
-                }
-            }
-
-            // 2. 備份到系統 Firestore
-            if (!user) return googleSheetSuccess;
+            if (!user) return false;
             try {
                 const recordsRef = getPublicCollectionRef();
                 await addDoc(recordsRef, {
@@ -171,7 +108,7 @@
                 return true;
             } catch (error) {
                 console.error("Failed to save Firestore record:", error);
-                return googleSheetSuccess;
+                return false;
             }
         };
 
@@ -364,7 +301,7 @@
                 <div class="bg-slate-800/50 border border-slate-700/60 p-4 rounded-2xl flex flex-col justify-between">
                     <h3 class="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wider"><i class="fa-solid fa-trophy mr-1.5 text-amber-500"></i>實時雲端排行榜</h3>
                     <div class="overflow-y-auto max-h-[220px] space-y-2 pr-1 text-xs" id="leaderboardList">
-                        <p class="text-slate-500 text-center py-4">正在載入排行榜資料...</p>
+                        <p class="text-slate-500 text-center py-4">等待系統連線中...</p>
                     </div>
                 </div>
 
@@ -418,9 +355,7 @@
                     <button onclick="window.location.reload();" class="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg transition-colors flex items-center gap-1.5">
                         <i class="fa-solid fa-rotate-left"></i> 再應戰一次
                     </button>
-                    <button id="teacherExportBtn" class="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold rounded-lg transition-colors flex items-center gap-1.5">
-                        <i class="fa-solid fa-download text-amber-500"></i> 下載教師數據 CSV
-                    </button>
+                    <!-- 原本的教師下載 CSV 按鈕 (若脫機使用，此按鈕無雲端備份，建議依賴 Google Sheet) -->
                 </div>
             </div>
 
@@ -442,8 +377,38 @@
         &copy; 2026 歷史科溫習平台 - 二戰歷史科單元溫習遊戲. 適用於中三級世界歷史科。
     </footer>
 
-    <!-- MAIN JAVASCRIPT LOGIC (SNAKE ENGINE, QUESTIONS & FLOW) -->
+    <!-- MAIN JAVASCRIPT LOGIC -->
     <script>
+        // 【獨立於 Firebase 模組外的 Google Sheets 上傳函式】
+        // 確保在任何情況 (包括 file:///) 都能執行
+        window.uploadToGoogleSheets = async function(record) {
+            const googleScriptUrl = "https://script.google.com/macros/s/AKfycbwU1KhUUZNCnAAugo8gttsx_bmt0uyH8dcqJiN_1c0jw1SEnoJnaTHDraSeu2C3KqDP/exec";
+            try {
+                const formData = new URLSearchParams();
+                formData.append('timestamp', new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }));
+                formData.append('studentClass', record.studentClass);
+                formData.append('studentNo', record.studentNo);
+                formData.append('studentName', record.studentName);
+                formData.append('score', record.score);
+                formData.append('correctCount', record.correctCount);
+                formData.append('totalQuestions', record.totalQuestions);
+                formData.append('accuracyPercent', record.accuracyPercent);
+
+                await fetch(googleScriptUrl, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: formData.toString()
+                });
+                return true;
+            } catch (err) {
+                console.error("Fetch Google Sheets Error:", err);
+                return false;
+            }
+        };
+
         // 包含從你上載文件中擷取的最新問題
         const QUESTION_BANK = {
             mc: [
@@ -523,7 +488,7 @@
                     q: "為了迫使日本盡快投降，美國在1945年8月對日本哪兩個城市投下了原子彈？",
                     options: ["東京、大阪", "廣島、長崎", "京都、橫濱", "廣島、東京"],
                     answer: "廣島、長崎",
-                    explanation: "美國分別在1945年8月6日與9日，在廣島和長崎投下原子彈，促成了日本無條件投降，終結二戰。"
+                    explanation: "美國分別在1945年8月6日與9日，在廣島 and 長崎投下原子彈，促成了日本無條件投降，終結二戰。"
                 },
                 {
                     q: "二戰後為了維持國際和平與安全，成立了甚麼國際組織取代失效的國際聯盟？",
@@ -821,12 +786,10 @@
         }
 
         window.addEventListener('keydown', (e) => {
-            // 防干擾：打字時不觸發蛇的移動
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') {
                 return;
             }
 
-            // e.code 能無視中文輸入法與大小寫，直接捕捉實體按鍵
             switch(e.code) {
                 case 'ArrowUp':
                 case 'KeyW':
@@ -1059,7 +1022,7 @@
             };
         }
 
-        // --- END GAME, LEADERS, REPORTS ---
+        // --- END GAME & GOOGLE SHEETS UPLOAD ---
         async function triggerGameEnding() {
             clearInterval(snakeTimer);
             document.getElementById('gameWorkspace').classList.add('hidden');
@@ -1114,11 +1077,26 @@
                 detailedResponses: responses
             };
 
+            // 1. 獨立呼叫 Google Sheets 上傳 (不受 module 限制)
+            const sheetSuccess = await window.uploadToGoogleSheets(recordPayload);
+            const statusEl = document.getElementById('uploadStatus');
+            if (statusEl) {
+                if (sheetSuccess) {
+                    statusEl.innerHTML = `<i class="fa-solid fa-cloud-arrow-up text-emerald-400 mr-1.5 animate-bounce"></i>數據已成功發送至老師的 Google 試算表！`;
+                    statusEl.className = "text-xs text-emerald-400 mt-3 font-semibold flex items-center justify-center bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20";
+                } else {
+                    statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-rose-400 mr-1.5"></i>Google 試算表發送失敗，但本機與雲端榜已儲存。`;
+                    statusEl.className = "text-xs text-rose-400 mt-3 font-semibold flex items-center justify-center bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20";
+                }
+            }
+
+            // 2. 備份到系統 Firestore
             if (window.saveGameRecord) {
                 await window.saveGameRecord(recordPayload);
             }
         }
 
+        // --- 排行榜 UI 渲染函數 ---
         window.updateLeaderboardUI = (list) => {
             const listContainer = document.getElementById('leaderboardList');
             if (!listContainer) return;
@@ -1152,40 +1130,11 @@
             });
         };
 
-        document.getElementById('teacherExportBtn').onclick = () => {
-            const pw = prompt("請輸入教師管理密碼以導出所有學生作答數據：");
-            if (pw !== "schoolf32026") {
-                alert("密碼不正確，拒絕訪問數據！");
-                return;
-            }
-            const allRecords = window.getLeaderboardData();
-            if (!allRecords || allRecords.length === 0) {
-                alert("目前尚無學生提交紀錄，無法導出！");
-                return;
-            }
-            let csvContent = "\uFEFF"; 
-            csvContent += "排名,班別,學號,姓名,得分,答對題數,總題數,正確率(%),提交時間\n";
-            allRecords.forEach((rec, idx) => {
-                let dateStr = "";
-                if (rec.timestamp) {
-                    try {
-                        const date = rec.timestamp.toDate ? rec.timestamp.toDate() : new Date(rec.timestamp);
-                        dateStr = date.toLocaleString();
-                    } catch(e) {
-                        dateStr = "未知";
-                    }
-                }
-                csvContent += `${idx + 1},${rec.studentClass},${rec.studentNo},${rec.studentName},${rec.score},${rec.correctCount},${rec.totalQuestions},${rec.accuracyPercent}%,${dateStr}\n`;
-            });
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.setAttribute("href", url);
-            link.setAttribute("download", `歷史溫習小遊戲_二戰數據報表_${new Date().toLocaleDateString()}.csv`);
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        };
+        // 【修復關鍵】：若常規腳本加載完成時，Firebase 已經把數據推送過來了，立即進行補償渲染。
+        if (window.pendingLeaderboardList) {
+            window.updateLeaderboardUI(window.pendingLeaderboardList);
+            delete window.pendingLeaderboardList; // 清理快取
+        }
     </script>
 </body>
 </html>
